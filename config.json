@@ -1,0 +1,4 @@
+{
+  "thumbnail_cache": "~/.cache/photo_app/thumbs",
+  "db_path": "~/.local/share/photo_app/photos.db"
+}
