@@ -68,6 +68,7 @@ class PreviewWindow(QDialog):
         self._idx     = max(0, min(start_index, len(images) - 1))
         self._orig_pil: Image.Image | None = None   # full-res PIL for enhance
         self._enhance_open = False
+        self._zoom = 1.0
 
         self.setWindowTitle("Preview")
         self.setModal(False)
@@ -213,6 +214,7 @@ class PreviewWindow(QDialog):
         path = img["path"]
 
         self._orig_pil = None
+        self._zoom = 1.0
         self._reset_sliders(update_preview=False)
 
         if _is_video(path):
@@ -247,16 +249,26 @@ class PreviewWindow(QDialog):
         self._next_btn.setEnabled(self._idx < len(self._images) - 1)
 
     def _refresh_preview(self):
-        """Re-render the preview from _orig_pil with current slider values."""
+        """Re-render the preview from _orig_pil with current slider values and zoom."""
         if self._orig_pil is None:
             return
         img = self._apply_adjustments(self._orig_pil)
-        available = self._scroll.size() - QSize(24, 24)
-        if available.width() < 1:
-            available = QSize(1200, 780)
         pix = _pil_to_pixmap(img)
-        scaled = pix.scaled(available, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        if self._zoom == 1.0:
+            # Fit to window
+            available = self._scroll.size() - QSize(24, 24)
+            if available.width() < 1:
+                available = QSize(1200, 780)
+            scaled = pix.scaled(available, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        else:
+            # Zoom relative to natural size
+            w = int(pix.width() * self._zoom)
+            h = int(pix.height() * self._zoom)
+            scaled = pix.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
         self._img_lbl.setPixmap(scaled)
+        self._img_lbl.resize(scaled.size())
 
     def _apply_adjustments(self, img: Image.Image) -> Image.Image:
         """Return a new PIL image with all slider adjustments applied."""
@@ -349,6 +361,15 @@ class PreviewWindow(QDialog):
             QMessageBox.warning(self, "Save Failed", str(exc))
 
     # ── Events ─────────────────────────────────────────────────────────────
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self._zoom = min(self._zoom * 1.15, 8.0)
+        else:
+            self._zoom = max(self._zoom / 1.15, 0.1)
+        self._refresh_preview()
+        event.accept()
 
     def keyPressEvent(self, event: QKeyEvent):
         k = event.key()
