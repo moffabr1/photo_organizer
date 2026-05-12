@@ -205,3 +205,7 @@ class GridView(QListView):
         """)
 
         self.doubleClicked.connect(lambda idx: self.image_activated.emit(idx.row()))
+
+    def scroll_to_row(self, row: int):
+        idx = self.model().index(row, 0)
+        self.scrollTo(idx, QAbstractItemView.PositionAtTop)

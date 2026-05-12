@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from PIL import Image
+import datetime
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -29,7 +30,9 @@ from app.database import PhotoDB
 from app.scanner import FolderScanner
 from app.thumbnailer import ThumbnailLoader
 from app.ui.grid_view import GridModel, GridView
+from app.ui.year_scrubber import YearScrubber
 from app.ui.preview_window import PreviewWindow
+from app.ui.properties_dialog import PropertiesDialog
 from app.ui.sidebar import Sidebar
 
 _MENU_SS = """
@@ -93,7 +96,20 @@ class MainWindow(QMainWindow):
         # Grid
         self._model    = GridModel(self._loader)
         self._grid     = GridView(self._model)
-        self._splitter.addWidget(self._grid)
+
+        # Grid + year scrubber container
+        grid_container = QWidget()
+        grid_container.setStyleSheet("QWidget { background: #1c1c1e; }")
+        gc_layout = QHBoxLayout(grid_container)
+        gc_layout.setContentsMargins(0, 0, 0, 0)
+        gc_layout.setSpacing(0)
+        gc_layout.addWidget(self._grid, 1)
+
+        self._scrubber = YearScrubber()
+        self._scrubber.jump_to_row.connect(self._grid.scroll_to_row)
+        gc_layout.addWidget(self._scrubber)
+
+        self._splitter.addWidget(grid_container)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setSizes([224, 1256])
@@ -176,6 +192,22 @@ class MainWindow(QMainWindow):
             f"{n:,} photos"
             + (f"  (library: {total:,})" if n != total else "")
         )
+        self._update_scrubber(images)
+
+    def _update_scrubber(self, images: list):
+        year_rows: dict[str, int] = {}
+        for i, img in enumerate(images):
+            date = img.get("date_taken") or ""
+            if date and len(date) >= 4 and date[:4].isdigit():
+                year = date[:4]
+            else:
+                try:
+                    year = str(datetime.datetime.fromtimestamp(img["mtime"]).year)
+                except Exception:
+                    year = "????"
+            if year not in year_rows:
+                year_rows[year] = i
+        self._scrubber.update_years(year_rows)
 
     def _set_filter(self, kind: str, value):
         self._filter = (kind, value)
@@ -310,6 +342,9 @@ class MainWindow(QMainWindow):
         menu.setStyleSheet(_MENU_SS)
 
         if not multi:
+            menu.addAction("ℹ️  Properties").triggered.connect(
+                lambda: PropertiesDialog(path, self).exec()
+            )
             menu.addAction("🔍  Preview").triggered.connect(
                 lambda: self._open_preview(idx.row())
             )
@@ -449,6 +484,7 @@ class MainWindow(QMainWindow):
                 try:
                     os.remove(img["path"])
                     self._db.delete_image(img["path"])
+                    self._loader.invalidate(img["path"])
                 except Exception:
                     pass
             self._reload_grid()
@@ -464,6 +500,7 @@ class MainWindow(QMainWindow):
             try:
                 os.remove(path)
                 self._db.delete_image(path)
+                self._loader.invalidate(path)
                 self._reload_grid()
             except Exception as exc:
                 QMessageBox.warning(self, "Delete Failed", str(exc))
@@ -499,6 +536,7 @@ class MainWindow(QMainWindow):
                 try:
                     os.remove(img["path"])
                     self._db.delete_image(img["path"])
+                    self._loader.invalidate(img["path"])
                 except Exception:
                     pass
             self._reload_grid()

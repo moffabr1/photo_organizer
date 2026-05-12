@@ -141,12 +141,19 @@ class PhotoDB:
             params.append(source_id)
 
         where_clause = f"WHERE {' AND '.join(wheres)}" if wheres else ""
-        order = "ASC" if asc else "DESC"
-        sort = "COALESCE(i.date_taken, datetime(i.mtime, 'unixepoch'))"
+        year_order = "ASC" if asc else "DESC"
+
+        # Sort by year (date_taken preferred, mtime fallback), then path for stability
+        sort_year = """
+            CAST(COALESCE(
+                NULLIF(CAST(substr(i.date_taken, 1, 4) AS INTEGER), 0),
+                CAST(strftime('%Y', datetime(i.mtime, 'unixepoch')) AS INTEGER)
+            ) AS INTEGER)
+        """
 
         sql = (
             f"SELECT DISTINCT i.* FROM images i {joins} "
-            f"{where_clause} ORDER BY {sort} {order}"
+            f"{where_clause} ORDER BY {sort_year} {year_order}, i.path ASC"
         )
         return [dict(r) for r in self.conn.execute(sql, params)]
 

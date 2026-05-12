@@ -1,22 +1,22 @@
 """
-Full-size image preview window with simple non-destructive enhancement.
+Full-size image preview window with zoom and enhancement.
 
 Navigation : ← → Space Esc
+Zoom       : scroll wheel (up = in, down = out, floor at 0.5x)
 Enhancement: Brightness / Contrast / Saturation / Sharpness sliders
              + Auto-enhance button.
              Changes are preview-only until Apply is clicked.
-             Apply writes to disk and emits file_changed(path).
 """
 from __future__ import annotations
 import os
 from pathlib import Path
 
 from PIL import Image, ImageEnhance, ImageOps
-from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtCore import Qt, QSize, QEvent, Signal
 from PySide6.QtGui import QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QSlider, QVBoxLayout, QWidget, QMessageBox,
+    QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QScrollArea, QSlider, QVBoxLayout, QWidget,
 )
 
 VIDEO_EXTENSIONS = {
@@ -60,15 +60,14 @@ def _pil_to_pixmap(img: Image.Image) -> QPixmap:
 
 
 class PreviewWindow(QDialog):
-    file_changed = Signal(str)   # emitted after Apply so grid refreshes thumb
+    file_changed = Signal(str)
 
     def __init__(self, images: list[dict], start_index: int = 0, parent=None):
         super().__init__(parent)
         self._images  = images
         self._idx     = max(0, min(start_index, len(images) - 1))
-        self._orig_pil: Image.Image | None = None   # full-res PIL for enhance
-        self._enhance_open = False
-        self._zoom = 1.0
+        self._orig_pil: Image.Image | None = None
+        self._zoom    = 1.0
 
         self.setWindowTitle("Preview")
         self.setModal(False)
@@ -95,6 +94,10 @@ class PreviewWindow(QDialog):
         self._img_lbl.setAlignment(Qt.AlignCenter)
         self._img_lbl.setStyleSheet("background: #111113;")
         self._scroll.setWidget(self._img_lbl)
+
+        # Intercept wheel on scroll viewport so scrollbar doesn't move
+        self._scroll.viewport().installEventFilter(self)
+
         root.addWidget(self._scroll, 1)
 
         # Enhance panel (hidden by default)
@@ -183,12 +186,11 @@ class PreviewWindow(QDialog):
 
         outer.addSpacing(12)
 
-        # Buttons column
         btn_col = QVBoxLayout()
         btn_col.setSpacing(6)
-        auto_btn   = QPushButton("Auto")
-        reset_btn  = QPushButton("Reset")
-        apply_btn  = QPushButton("Apply")
+        auto_btn  = QPushButton("Auto")
+        reset_btn = QPushButton("Reset")
+        apply_btn = QPushButton("Apply")
         apply_btn.setStyleSheet(
             _BTN + "QPushButton { background: #1a4a2a; color: #6af0a0; }"
                    "QPushButton:hover { background: #1e5e34; }"
@@ -210,17 +212,17 @@ class PreviewWindow(QDialog):
     def _show_current(self):
         if not self._images:
             return
-        img = self._images[self._idx]
+        img  = self._images[self._idx]
         path = img["path"]
 
         self._orig_pil = None
-        self._zoom = 1.0
+        self._zoom     = 1.0
         self._reset_sliders(update_preview=False)
 
         if _is_video(path):
             self._img_lbl.setText(
                 f'<span style="color:#909098; font-size:14px;">'
-                f'🎬  Video file — double-click in grid to open in player<br>'
+                f'🎬  Video — double-click in grid to open in player<br>'
                 f'<small>{path}</small></span>'
             )
             self._enhance_btn.setEnabled(False)
@@ -249,21 +251,18 @@ class PreviewWindow(QDialog):
         self._next_btn.setEnabled(self._idx < len(self._images) - 1)
 
     def _refresh_preview(self):
-        """Re-render the preview from _orig_pil with current slider values and zoom."""
         if self._orig_pil is None:
             return
         img = self._apply_adjustments(self._orig_pil)
         pix = _pil_to_pixmap(img)
 
         if self._zoom == 1.0:
-            # Fit to window
             available = self._scroll.size() - QSize(24, 24)
             if available.width() < 1:
                 available = QSize(1200, 780)
             scaled = pix.scaled(available, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
-            # Zoom relative to natural size
-            w = int(pix.width() * self._zoom)
+            w = int(pix.width()  * self._zoom)
             h = int(pix.height() * self._zoom)
             scaled = pix.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
@@ -271,23 +270,12 @@ class PreviewWindow(QDialog):
         self._img_lbl.resize(scaled.size())
 
     def _apply_adjustments(self, img: Image.Image) -> Image.Image:
-        """Return a new PIL image with all slider adjustments applied."""
         def factor(val: int) -> float:
-            # slider -100..+100 → factor 0.0..2.0 (1.0 = no change)
             return 1.0 + val / 100.0
-
-        img = ImageEnhance.Brightness(img).enhance(
-            factor(self._sliders["Brightness"].value())
-        )
-        img = ImageEnhance.Contrast(img).enhance(
-            factor(self._sliders["Contrast"].value())
-        )
-        img = ImageEnhance.Color(img).enhance(
-            factor(self._sliders["Saturation"].value())
-        )
-        img = ImageEnhance.Sharpness(img).enhance(
-            factor(self._sliders["Sharpness"].value())
-        )
+        img = ImageEnhance.Brightness(img).enhance(factor(self._sliders["Brightness"].value()))
+        img = ImageEnhance.Contrast(img).enhance(factor(self._sliders["Contrast"].value()))
+        img = ImageEnhance.Color(img).enhance(factor(self._sliders["Saturation"].value()))
+        img = ImageEnhance.Sharpness(img).enhance(factor(self._sliders["Sharpness"].value()))
         return img
 
     def _prev(self):
@@ -304,13 +292,25 @@ class PreviewWindow(QDialog):
         if self._images:
             os.system(f'xdg-open "{self._images[self._idx]["path"]}"')
 
+    # ── Zoom (event filter on scroll viewport) ─────────────────────────────
+
+    def eventFilter(self, obj, event):
+        if obj == self._scroll.viewport() and event.type() == QEvent.Type.Wheel:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self._zoom = min(self._zoom * 1.15, 8.0)
+            else:
+                self._zoom = max(self._zoom / 1.15, 0.5)
+            self._refresh_preview()
+            return True
+        return super().eventFilter(obj, event)
+
     # ── Enhance panel ──────────────────────────────────────────────────────
 
     def _toggle_enhance(self, checked: bool):
         self._enhance_widget.setVisible(checked)
 
     def _on_slider_changed(self, _val: int):
-        # Update the numeric label next to each slider
         for name, sl in self._sliders.items():
             self._slider_labels[name].setText(str(sl.value()))
         self._refresh_preview()
@@ -328,14 +328,11 @@ class PreviewWindow(QDialog):
     def _auto_enhance(self):
         if self._orig_pil is None:
             return
-        # Auto-contrast then slight sharpness boost
         auto = ImageOps.autocontrast(self._orig_pil, cutoff=0.5)
-        # Reflect roughly in sliders (contrast up a bit, sharpness up a bit)
         self._sliders["Contrast"].setValue(15)
         self._sliders["Sharpness"].setValue(20)
         self._sliders["Brightness"].setValue(0)
         self._sliders["Saturation"].setValue(0)
-        # Override preview with actual autocontrast result
         available = self._scroll.size() - QSize(24, 24)
         pix = _pil_to_pixmap(auto)
         scaled = pix.scaled(available, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -345,7 +342,7 @@ class PreviewWindow(QDialog):
         if self._orig_pil is None:
             return
         path = self._images[self._idx]["path"]
-        ret = QMessageBox.question(
+        ret  = QMessageBox.question(
             self, "Apply Enhancement",
             "Save changes to disk? This overwrites the original file.",
         )
@@ -361,15 +358,6 @@ class PreviewWindow(QDialog):
             QMessageBox.warning(self, "Save Failed", str(exc))
 
     # ── Events ─────────────────────────────────────────────────────────────
-
-    def wheelEvent(self, event):
-        delta = event.angleDelta().y()
-        if delta > 0:
-            self._zoom = min(self._zoom * 1.15, 8.0)
-        else:
-            self._zoom = max(self._zoom / 1.15, 0.1)
-        self._refresh_preview()
-        event.accept()
 
     def keyPressEvent(self, event: QKeyEvent):
         k = event.key()
